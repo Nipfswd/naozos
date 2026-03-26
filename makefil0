@@ -3,6 +3,7 @@ include project.mk
 KERNEL_OBJS := \
 	base/boot/bldr/i386/initx86.o \
 	base/ntos/init/init.o \
+	base/ntos/ke/i386/i386init.o \
 	drivers/vga.o
 
 all: $(TARGET).iso
@@ -14,6 +15,9 @@ base/boot/bldr/i386/%.o: base/boot/bldr/i386/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 base/ntos/init/%.o: base/ntos/init/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+base/ntos/ke/i386/%.o: base/ntos/ke/i386/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 drivers/%.o: drivers/%.c | $(BUILD_DIR)
