@@ -31,13 +31,13 @@ static void vga_put_char(char c, uint8_t color) {
     }
 }
 
-static void vga_write_string(const char *s, uint8_t color) {
+void vga_write_string(const char *s, uint8_t color) {
     while (*s) {
         vga_put_char(*s++, color);
     }
 }
 
-static void vga_clear(uint8_t color) {
+void vga_clear(uint8_t color) {
     for (uint32_t y = 0; y < VGA_HEIGHT; y++) {
         for (uint32_t x = 0; x < VGA_WIDTH; x++) {
             vga_buffer[y * VGA_WIDTH + x] = vga_entry(' ', color);
@@ -47,6 +47,6 @@ static void vga_clear(uint8_t color) {
     cursor_y = 0;
 }
 
-static void vga_init(void) {
+void vga_init(void) {
     /* reserved for future hardware init */
 }

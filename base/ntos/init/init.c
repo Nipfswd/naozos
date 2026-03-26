@@ -1,8 +1,8 @@
 #include <stdint.h>
 
-static void vga_init(void);
-static void vga_clear(uint8_t color);
-static void vga_write_string(const char *s, uint8_t color);
+void vga_init(void);
+void vga_clear(uint8_t color);
+void vga_write_string(const char *s, uint8_t color);
 
 void kmain(void) {
     vga_init();
