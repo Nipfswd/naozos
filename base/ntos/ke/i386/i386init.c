@@ -1,7 +1,7 @@
 #include <stdint.h>
 
 /*
- * Minimal KE/i386 processor bring-up for NaznaOS v0.0.0.4
+ * Minimal KE/i386 processor bring-up for NaznaOS v0.0.0.5
  *
  * - Installs a private GDT with:
  *     * KGDT_R0_CODE (0x08)
@@ -10,16 +10,34 @@
  *     * KGDT_R0_PCR  (0x30)
  * - Sets up a minimal TSS with a dedicated ring0 stack
  * - Sets up a minimal PCR structure and maps it via FS
- * - Installs a flat IDT with a default handler for all vectors
- *
- * This is a clean C re-implementation inspired by your old ks386/i386pcr layout,
- * but not binary-compatible with the original NT-style PCR yet.
+ * - Installs a flat IDT with:
+ *     * default handler for all vectors
+ *     * a real timer interrupt handler on vector 0x20 (IRQ0)
+ * - Initializes PIC + PIT and enables interrupts
  */
 
 #define KGDT_R0_CODE 0x08
 #define KGDT_R0_DATA 0x10
 #define KGDT_TSS     0x28
 #define KGDT_R0_PCR  0x30
+
+/* ---------------------------------------------------------------------- */
+/* Low-level port I/O                                                     */
+/* ---------------------------------------------------------------------- */
+
+static inline void outb(uint16_t port, uint8_t value) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ __volatile__("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/* ---------------------------------------------------------------------- */
+/* IDT / GDT / TSS / PCR structures                                       */
+/* ---------------------------------------------------------------------- */
 
 struct idt_entry {
     uint16_t base_low;
@@ -92,6 +110,10 @@ struct pcr_minimal {
     void *Tss;
 };
 
+/* ---------------------------------------------------------------------- */
+/* Global tables + PCR + TSS                                              */
+/* ---------------------------------------------------------------------- */
+
 static struct idt_entry Idt[256];
 static struct idt_ptr   IdtDescriptor;
 
@@ -104,7 +126,20 @@ static uint8_t          TssStack[4096];
 static struct pcr_minimal Pcr;
 
 /* ---------------------------------------------------------------------- */
-/* IDT: default handler and setup                                         */
+/* Enterprise-style tick count (NT-like triple)                           */
+/* ---------------------------------------------------------------------- */
+
+typedef struct _KE_TICK_COUNT {
+    uint32_t LowPart;     /* +0  */
+    uint32_t High1Part;   /* +4  */
+    uint32_t High2Part;   /* +8  */
+} KE_TICK_COUNT;
+
+volatile KE_TICK_COUNT KeTickCount = {0, 0, 0};
+uint32_t KeTimeAdjustment = 1;
+
+/* ---------------------------------------------------------------------- */
+/* Default interrupt handler                                              */
 /* ---------------------------------------------------------------------- */
 
 __attribute__((noreturn))
@@ -113,6 +148,66 @@ static void KeDefaultInterruptHandler(void) {
         __asm__ __volatile__("cli; hlt");
     }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Timer interrupt handler (IRQ0, vector 0x20)                            */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * Naked ISR, full body in asm, no stub.
+ * Uses the exact KeTickCount update pattern from legacy clockint.asm:
+ *
+ *   mov     ecx,eax                 ; copy low tick count
+ *   mov     edx,_KeTickCount+4      ; get high tick count
+ *   add     ecx,1                   ; increment tick count
+ *   adc     edx,0                   ; propagate carry
+ *   mov     _KeTickCount+8,edx      ; store high 2 tick count
+ *   mov     _KeTickCount+0,ecx      ; store low tick count
+ *   mov     _KeTickCount+4,edx      ; store high 1 tick count
+ *
+ * plus KeTimeAdjustment added into the low part before increment.
+ */
+
+__attribute__((naked))
+void KeTimerInterrupt(void) {
+    __asm__ __volatile__(
+        "pusha\n\t"
+
+        /* Load current low tick count into EAX */
+        "movl KeTickCount, %eax\n\t"
+
+        /* ECX = low tick count + KeTimeAdjustment */
+        "movl %eax, %ecx\n\t"
+        "addl KeTimeAdjustment, %ecx\n\t"
+
+        /* EDX = high tick count */
+        "movl KeTickCount+4, %edx\n\t"
+
+        /* Increment ECX by 1, propagate carry into EDX */
+        "addl $1, %ecx\n\t"
+        "adcl $0, %edx\n\t"
+
+        /* Store back:
+         *   LowPart   = ECX
+         *   High1Part = EDX
+         *   High2Part = EDX
+         */
+        "movl %edx, KeTickCount+8\n\t"
+        "movl %ecx, KeTickCount\n\t"
+        "movl %edx, KeTickCount+4\n\t"
+
+        /* Send EOI to master PIC (IRQ0) */
+        "movb $0x20, %al\n\t"
+        "outb %al, $0x20\n\t"
+
+        "popa\n\t"
+        "iret\n\t"
+    );
+}
+
+/* ---------------------------------------------------------------------- */
+/* IDT setup                                                              */
+/* ---------------------------------------------------------------------- */
 
 static void KeSetIdtEntry(int vec, void (*handler)(void)) {
     uint32_t base = (uint32_t)handler;
@@ -137,9 +232,13 @@ static void KeInitIdt(void) {
         Idt[i].base_high = 0;
     }
 
+    /* Default handler for all vectors */
     for (int i = 0; i < 256; i++) {
         KeSetIdtEntry(i, KeDefaultInterruptHandler);
     }
+
+    /* Timer interrupt on vector 0x20 (IRQ0 after PIC remap) */
+    KeSetIdtEntry(0x20, KeTimerInterrupt);
 
     IdtDescriptor.limit = (uint16_t)(sizeof(Idt) - 1);
     IdtDescriptor.base  = (uint32_t)&Idt;
@@ -259,6 +358,53 @@ static void KeInitGdtAndPcr(void) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* PIC + PIT initialization                                               */
+/* ---------------------------------------------------------------------- */
+
+static void KeInitPic(void) {
+    /* Remap PIC:
+     *  Master: 0x20–0x27
+     *  Slave : 0x28–0x2F
+     */
+    uint8_t master_mask = inb(0x21);
+    uint8_t slave_mask  = inb(0xA1);
+
+    /* Start initialization sequence (cascade mode) */
+    outb(0x20, 0x11);
+    outb(0xA0, 0x11);
+
+    /* Set vector offsets */
+    outb(0x21, 0x20); /* Master PIC vector offset */
+    outb(0xA1, 0x28); /* Slave PIC vector offset */
+
+    /* Tell Master PIC there is a slave at IRQ2 (0000 0100) */
+    outb(0x21, 0x04);
+    /* Tell Slave PIC its cascade identity (0000 0010) */
+    outb(0xA1, 0x02);
+
+    /* Set environment info */
+    outb(0x21, 0x01);
+    outb(0xA1, 0x01);
+
+    /* Restore masks, but unmask IRQ0 on master */
+    master_mask &= ~0x01; /* enable IRQ0 */
+    outb(0x21, master_mask);
+    outb(0xA1, slave_mask);
+}
+
+static void KeInitPit(void) {
+    /* PIT frequency: 1193182 Hz
+     * We choose 100 Hz tick rate => divisor ≈ 11932
+     */
+    uint16_t divisor = 11932;
+
+    /* Command byte: channel 0, lobyte/hibyte, mode 3 (square wave), binary */
+    outb(0x43, 0x36);
+    outb(0x40, (uint8_t)(divisor & 0xFF));
+    outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
+}
+
+/* ---------------------------------------------------------------------- */
 /* Public entry: full processor bring-up                                  */
 /* ---------------------------------------------------------------------- */
 
@@ -266,4 +412,9 @@ void KeInitProcessor(void) {
     KeInitGdtAndPcr();
     KeInitTss();
     KeInitIdt();
+    KeInitPic();
+    KeInitPit();
+
+    /* Enable interrupts globally */
+    __asm__ __volatile__("sti");
 }
