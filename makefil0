@@ -4,6 +4,7 @@ KERNEL_OBJS := \
 	base/boot/bldr/i386/initx86.o \
 	base/ntos/init/init.o \
 	base/ntos/ke/i386/i386init.o \
+	base/ntos/ke/i386/kex86.o \
 	drivers/vga.o
 
 all: $(TARGET).iso
