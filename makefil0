@@ -1,0 +1,38 @@
+include project.mk
+
+KERNEL_OBJS := \
+	base/boot/bldr/i386/initx86.o \
+	base/ntos/init/init.o \
+	drivers/vga.o
+
+all: $(TARGET).iso
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+base/boot/bldr/i386/%.o: base/boot/bldr/i386/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+base/ntos/init/%.o: base/ntos/init/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+drivers/%.o: drivers/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(KERNEL_BIN): $(KERNEL_OBJS) linker.ld | $(BUILD_DIR)
+	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJS)
+
+$(TARGET).iso: $(KERNEL_BIN) base/boot/bldr/grub.cfg
+	rm -rf $(ISO_DIR)
+	mkdir -p $(GRUB_DIR)
+	cp $(KERNEL_BIN) $(BOOT_DIR)/kernel.bin
+	cp base/boot/bldr/grub.cfg $(GRUB_DIR)/grub.cfg
+	grub-mkrescue -o $(TARGET).iso $(ISO_DIR)
+
+run: $(TARGET).iso
+	qemu-system-i386 -cdrom $(TARGET).iso
+
+clean:
+	rm -rf $(BUILD_DIR) $(TARGET).iso $(KERNEL_OBJS)
+
+.PHONY: all run clean
